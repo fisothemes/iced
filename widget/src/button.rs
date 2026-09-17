@@ -299,8 +299,7 @@ where
         }
 
         match event {
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
-            | Event::Touch(touch::Event::FingerPressed { .. }) => {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if self.on_press.is_some() {
                     let bounds = layout.bounds();
 
@@ -313,8 +312,18 @@ where
                     }
                 }
             }
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-            | Event::Touch(touch::Event::FingerLifted { .. }) => {
+            Event::Touch(touch::Event::FingerPressed { position, .. }) => {
+                if self.on_press.is_some()
+                    && layout.bounds().contains(*position)
+                {
+                    let state = tree.state.downcast_mut::<State>();
+
+                    state.is_pressed = true;
+
+                    shell.capture_event();
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 if let Some(on_press) = &self.on_press {
                     let state = tree.state.downcast_mut::<State>();
 
@@ -324,6 +333,21 @@ where
                         let bounds = layout.bounds();
 
                         if cursor.is_over(bounds) {
+                            shell.publish(on_press.get());
+                        }
+
+                        shell.capture_event();
+                    }
+                }
+            }
+            Event::Touch(touch::Event::FingerLifted { position, .. }) => {
+                if let Some(on_press) = &self.on_press {
+                    let state = tree.state.downcast_mut::<State>();
+
+                    if state.is_pressed {
+                        state.is_pressed = false;
+
+                        if layout.bounds().contains(*position) {
                             shell.publish(on_press.get());
                         }
 
