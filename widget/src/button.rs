@@ -28,7 +28,7 @@ use crate::core::widget::tree::{self, Tree};
 use crate::core::window;
 use crate::core::{
     Background, Clipboard, Color, Element, Event, Layout, Length, Padding,
-    Rectangle, Shadow, Shell, Size, Theme, Vector, Widget,
+    Point, Rectangle, Shadow, Shell, Size, Theme, Vector, Widget,
 };
 
 /// A generic widget that produces a message when pressed.
@@ -198,9 +198,10 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 struct State {
     is_pressed: bool,
+    touch_position: Option<Point>,
 }
 
 impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
@@ -319,8 +320,16 @@ where
                     let state = tree.state.downcast_mut::<State>();
 
                     state.is_pressed = true;
+                    state.touch_position = Some(*position);
 
                     shell.capture_event();
+                }
+            }
+            Event::Touch(touch::Event::FingerMoved { position, .. }) => {
+                let state = tree.state.downcast_mut::<State>();
+
+                if state.is_pressed {
+                    state.touch_position = Some(*position);
                 }
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
@@ -346,6 +355,7 @@ where
 
                     if state.is_pressed {
                         state.is_pressed = false;
+                        state.touch_position = None;
 
                         if layout.bounds().contains(*position) {
                             shell.publish(on_press.get());
@@ -359,12 +369,21 @@ where
                 let state = tree.state.downcast_mut::<State>();
 
                 state.is_pressed = false;
+                state.touch_position = None;
             }
             _ => {}
         }
 
         let current_status = if self.on_press.is_none() {
             Status::Disabled
+        } else if let Some(touch_position) =
+            tree.state.downcast_ref::<State>().touch_position
+        {
+            if layout.bounds().contains(touch_position) {
+                Status::Pressed
+            } else {
+                Status::Active
+            }
         } else if cursor.is_over(layout.bounds()) {
             let state = tree.state.downcast_ref::<State>();
 
