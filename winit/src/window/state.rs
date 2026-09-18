@@ -4,7 +4,7 @@ use crate::core::{mouse, theme, window};
 use crate::graphics::Viewport;
 use crate::program::{self, Program};
 
-use winit::event::{Touch, WindowEvent};
+use winit::event::WindowEvent;
 use winit::window::Window;
 
 use std::fmt::{Debug, Formatter};
@@ -163,10 +163,7 @@ where
                 );
                 self.surface_version += 1;
             }
-            WindowEvent::CursorMoved { position, .. }
-            | WindowEvent::Touch(Touch {
-                location: position, ..
-            }) => {
+            WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some(*position);
             }
             WindowEvent::CursorLeft { .. } => {

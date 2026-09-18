@@ -396,8 +396,8 @@ where
                                             let _ = body
                                                 .append_child(&canvas)
                                                 .expect(
-                                                "Append canvas to HTML body",
-                                            );
+                                                    "Append canvas to HTML body",
+                                                );
                                         }
                                     };
                                 }
@@ -514,7 +514,7 @@ async fn run_instance<P>(
     let mut is_window_opening = !is_daemon;
 
     let mut compositor = None;
-    let mut events = Vec::new();
+    let mut events: Vec<(window::Id, core::Event, mouse::Cursor)> = Vec::new();
     let mut messages = Vec::new();
     let mut actions = 0;
 
@@ -704,6 +704,7 @@ async fn run_instance<P>(
                         position: window.position(),
                         size: window.logical_size(),
                     }),
+                    window.state.cursor(),
                 ));
 
                 if clipboard.window_id().is_none() {
@@ -1116,7 +1117,10 @@ async fn run_instance<P>(
                                 window.state.scale_factor(),
                                 window.state.modifiers(),
                             ) {
-                                events.push((id, event));
+                                let cursor =
+                                    event_cursor(&event, window.state.cursor());
+
+                                events.push((id, event, cursor));
                             }
                         }
                     }
@@ -1139,9 +1143,10 @@ async fn run_instance<P>(
                             let interact_span = debug::interact(id);
                             let mut window_events = vec![];
 
-                            events.retain(|(window_id, event)| {
+                            events.retain(|(window_id, event, cursor)| {
                                 if *window_id == id {
-                                    window_events.push(event.clone());
+                                    window_events
+                                        .push((event.clone(), *cursor));
                                     false
                                 } else {
                                     true
@@ -1152,16 +1157,63 @@ async fn run_instance<P>(
                                 continue;
                             }
 
-                            let (ui_state, statuses) = user_interfaces
+                            let mut ui_state = user_interface::State::Updated {
+                                redraw_request: window::RedrawRequest::Wait,
+                                input_method: core::InputMethod::Disabled,
+                                mouse_interaction: mouse::Interaction::None,
+                                has_layout_changed: false,
+                            };
+                            let mut statuses =
+                                Vec::with_capacity(window_events.len());
+
+                            let ui = user_interfaces
                                 .get_mut(&id)
-                                .expect("Get user interface")
-                                .update(
-                                    &window_events,
+                                .expect("Get user interface");
+
+                            let mut run_start = 0;
+
+                            while run_start < window_events.len() {
+                                let cursor = window_events[run_start].1;
+
+                                let mut run_end = run_start + 1;
+
+                                while run_end < window_events.len()
+                                    && window_events[run_end].1 == cursor
+                                {
+                                    run_end += 1;
+                                }
+
+                                let run: Vec<core::Event> = window_events
+                                    [run_start..run_end]
+                                    .iter()
+                                    .map(|(event, _cursor)| event.clone())
+                                    .collect();
+
+                                let (run_state, run_statuses) = ui.update(
+                                    &run,
+                                    cursor,
+                                    &mut window.renderer,
+                                    &mut clipboard,
+                                    &mut messages,
+                                );
+
+                                ui_state = merge_ui_state(ui_state, run_state);
+                                statuses.extend(run_statuses);
+
+                                run_start = run_end;
+                            }
+
+                            if window_events.is_empty() {
+                                let (run_state, _statuses) = ui.update(
+                                    &[],
                                     window.state.cursor(),
                                     &mut window.renderer,
                                     &mut clipboard,
                                     &mut messages,
                                 );
+
+                                ui_state = merge_ui_state(ui_state, run_state);
+                            }
 
                             #[cfg(feature = "unconditional-rendering")]
                             window.request_redraw(
@@ -1186,7 +1238,7 @@ async fn run_instance<P>(
                                 }
                             }
 
-                            for (event, status) in window_events
+                            for ((event, _cursor), status) in window_events
                                 .into_iter()
                                 .zip(statuses.into_iter())
                             {
@@ -1202,7 +1254,7 @@ async fn run_instance<P>(
                             interact_span.finish();
                         }
 
-                        for (id, event) in events.drain(..) {
+                        for (id, event, _cursor) in events.drain(..) {
                             runtime.broadcast(
                                 subscription::Event::Interaction {
                                     window: id,
@@ -1274,6 +1326,70 @@ async fn run_instance<P>(
     }
 
     let _ = ManuallyDrop::into_inner(user_interfaces);
+}
+
+/// Returns the [`mouse::Cursor`] an event should be dispatched with.
+fn event_cursor(event: &core::Event, pointer: mouse::Cursor) -> mouse::Cursor {
+    match event {
+        core::Event::Touch(
+            core::touch::Event::FingerPressed { position, .. }
+            | core::touch::Event::FingerMoved { position, .. }
+            | core::touch::Event::FingerLifted { position, .. }
+            | core::touch::Event::FingerLost { position, .. },
+        ) => mouse::Cursor::Available(*position),
+        _ => pointer,
+    }
+}
+
+/// Combines the [`user_interface::State`] of two dispatch runs within one
+/// batch.
+fn merge_ui_state(
+    current: user_interface::State,
+    next: user_interface::State,
+) -> user_interface::State {
+    use user_interface::State;
+
+    match (current, next) {
+        (State::Outdated, _) | (_, State::Outdated) => State::Outdated,
+        (
+            State::Updated {
+                redraw_request: current_redraw,
+                has_layout_changed: current_layout_changed,
+                ..
+            },
+            State::Updated {
+                mouse_interaction,
+                redraw_request: next_redraw,
+                input_method,
+                has_layout_changed: next_layout_changed,
+            },
+        ) => State::Updated {
+            mouse_interaction,
+            redraw_request: match (current_redraw, next_redraw) {
+                (window::RedrawRequest::NextFrame, _)
+                | (_, window::RedrawRequest::NextFrame) => {
+                    window::RedrawRequest::NextFrame
+                }
+                (
+                    window::RedrawRequest::At(a),
+                    window::RedrawRequest::At(b),
+                ) => window::RedrawRequest::At(a.min(b)),
+                (
+                    window::RedrawRequest::At(at),
+                    window::RedrawRequest::Wait,
+                )
+                | (
+                    window::RedrawRequest::Wait,
+                    window::RedrawRequest::At(at),
+                ) => window::RedrawRequest::At(at),
+                (window::RedrawRequest::Wait, window::RedrawRequest::Wait) => {
+                    window::RedrawRequest::Wait
+                }
+            },
+            input_method,
+            has_layout_changed: current_layout_changed || next_layout_changed,
+        },
+    }
 }
 
 /// Builds a window's [`UserInterface`] for the [`Program`].
@@ -1348,7 +1464,7 @@ fn run_action<'a, P, C>(
     program: &'a program::Instance<P>,
     runtime: &mut Runtime<P::Executor, Proxy<P::Message>, Action<P::Message>>,
     compositor: &mut Option<C>,
-    events: &mut Vec<(window::Id, core::Event)>,
+    events: &mut Vec<(window::Id, core::Event, mouse::Cursor)>,
     messages: &mut Vec<P::Message>,
     clipboard: &mut Clipboard,
     control_sender: &mut mpsc::UnboundedSender<Control>,
@@ -1413,6 +1529,7 @@ fn run_action<'a, P, C>(
                     events.push((
                         id,
                         core::Event::Window(core::window::Event::Closed),
+                        mouse::Cursor::Unavailable,
                     ));
                 }
 
